@@ -16,15 +16,15 @@ from markdown import Markdown
 from internetarchive import upload, get_item
 from audio_feed import create_feed, write_feed, Enclosure
 
-
-TAGS = {    'TITULO': 'TIT2',
-            'FECHA': 'TCOP',
-            'TAGS': 'TIT1',
-            'AUTORES': 'TPE1',
-            'TEXTO': 'COMM',
-            'TIPO': 'TALB',
-            'IMG': 'APIC',
-            'ID': 'TGID',
+TAGS = {
+    'TITULO': 'TIT2',
+    'FECHA': 'TCOP',
+    'TAGS': 'TIT1',
+    'AUTORES': 'TPE1',
+    'TEXTO': 'COMM',
+    'TIPO': 'TALB',
+    'IMG': 'APIC',
+    'ID': 'TGID',
 }
 
 PATH_AUDIO = 'audios'
@@ -35,125 +35,160 @@ AUDIO_URL = 'podcast'
 S3ACC = 'S3ACC'
 S3KEY = 'S3KEY'
 
-def get_content_path(pelican):
-    return pelican.settings.get('PATH')
+class podcast_reader(object):
+    """ Simple podcast MP3 audio reader """
 
+    audio_picture = None
+    audio_date = None
+    audio_id = None
 
-def get_audio_path(pelican):
-    audio_path = pelican.settings.get('AUDIO_PATH', 'audio')
-    content_path = get_content_path(pelican)
+    image_file = None
+    image_fullpath = None
+    image_data = None
 
-    return os.path.join(content_path, audio_path)
+    title = 'foo'
+    type = 'bar'
 
+    def __init__(self, file_path, output_path):
+        self._path = file_path
+        self._output = output_path
+        self.audio_data = File(file_path)
+        self.duration = int(self.audio_data.info.length / 60)
+        self._load_internal_data()
 
-def get_list(pStr):
-    return [ x.strip() for x in str(pStr).decode('utf-8').split(",") ]
+    def get_tags(self, tag):
+        return self._get_list(self.audio_data.tags.getall(TAGS[tag])[0])
 
-def get_hsize(img, width):
-    wpercent = (width/float(img.size[0]))
-    return int((float(img.size[1])*float(wpercent)))
+    def text(self):
+        return str(self._tag('TEXTO')[0]).decode('utf-8')
 
-def save_image(oData, sPath):
-    basewidth = 500
-    img = Image.open(cStringIO.StringIO(oData))
-    height = get_hsize(img, basewidth)
-    img = img.resize((basewidth, height), Image.ANTIALIAS)
-    img.save(sPath)
+    def _image(self):
+        # looking for 'APIC:xxxx.ext'
+        for tag in self.audio_data.keys():
+            if 'APIC:' in tag:
+                self.audio_picture = self.audio_data[tag]
+
+        image_ext = ".%s" % (self.audio_picture.mime).split("/")[1]
+        self.image_file = path.join(PATH_AUDIO, PATH_IMGS, path.basename(self._path).replace('.mp3', image_ext))
+        self.image_fullpath = path.join(self._output, PATH_AUDIO, PATH_IMGS)
+        self.image_data = self.audio_picture.data
+
+    def _title(self):
+        self.title = str(self._tag('TITULO')[0]).decode('utf-8')
+        self.title_safe = self._safe_me(self.title)
+
+    def _date(self):
+        date = str(self._tag('FECHA')[0])
+        self.audio_date = datetime.datetime.strptime(date, "%Y-%m-%d")
+
+    # generate global id - to identify the file (unique_id)
+    def _id(self):
+        # if the user generate an ID, just use it
+        if self._tag('ID'):
+            self.audio_id = str(self._tag('ID')[0])
+
+        # we use date and safe version of title string
+        else:
+            self.audio_id = self.audio_date.strftime("%d%m%Y_")
+            self.audio_id += self.title_safe
+
+    def _type(self):
+        self.type = str(self._tag('TIPO')[0]).decode('utf-8')
+        self.type_safe = self._safe_me(self.type)
+
+    def _safe_me(self, name):
+        regex = re.compile("[^\w\-]")
+        return regex.sub(
+            "",
+            name.replace(" ", "_").lower()
+        )
+
+    def _tag(self, audio_tag):
+        return self.audio_data.tags.getall(TAGS[audio_tag])
+
+    def _get_list(self, audio_tag):
+        return [x.strip() for x in str(audio_tag).decode('utf-8').split(",")]
+
+    def _load_internal_data(self):
+        self._image()
+        self._title()
+        self._date()
+        self._id()
+        self._type()
+
 
 class audio_reader(BaseReader):
+    """ Pelican audio Reader """
+
     enabled = True
     file_extensions = ['mp3']
 
-    def read(self, sFilepath):
+    def read(self, file_path):
         S3ACC = self.settings.get('S3ACC')
         S3KEY = self.settings.get('S3KEY')
         content_path = self.settings.get("PATH", "content")
         output_path = self.settings.get("OUTPUT_PATH", "output")
-        aud = File(sFilepath)
-        regex = re.compile("[^\w\-]")
 
-        aPIC = None
-        audio_id = None
-        for aInfo in aud.keys():
-            if 'APIC:' in aInfo:
-                aPIC = aud[aInfo]
-        imgExt = ".%s" % (aPIC.mime).split("/")[1]
-        imgFile = path.join(PATH_AUDIO, PATH_IMGS, path.basename(sFilepath).replace('.mp3', imgExt))
-        imgPath = path.join(output_path, PATH_AUDIO, PATH_IMGS)
-        imgData = aPIC.data
+        pd = podcast_reader(file_path, output_path)
 
-        title = str(aud.tags.getall(TAGS['TITULO'])[0]).decode('utf-8')
-        date = str(aud.tags.getall(TAGS['FECHA'])[0])
-        ddate = datetime.datetime.strptime(date, "%Y-%m-%d")
-        # generamos el id - global del podcast que lo identifica de forma unica
-        # si usamos el tag - Identificador de Podcast - no generamos nada...
-        if aud.tags.getall(TAGS['ID']):
-            audio_id = str(aud.tags.getall(TAGS['ID'])[0])
-        else:
-            audio_id = ddate.strftime("%d%m%Y_")
-            audio_id += regex.sub("", title.replace(" ", "_").lower())
+        metadata = {
+            'title': pd.title,
+            'category': AUDIO_URL,
+            'tags': pd.get_tags('TAGS'),
+            'authors': pd.get_tags('AUTORES'),
+            'date': pd.audio_date.isoformat(),
+            'audio': 'https://archive.org/download/%s/%s' % (pd.audio_id, path.basename(file_path)),
+            'audio_id': pd.audio_id,
+            'embed': path.join(PATH_AUDIO, PATH_EMBED, path.basename(file_path).replace('.mp3', '.html')),
+            'image': pd.image_file,
+            'duration': pd.duration,
+            'size': os.stat(file_path).st_size,
+            'type': pd.type,
+            'type_safe': pd.type_safe,
+            'template': 'audio',
+        }
 
-        metadata = {'title': title,
-                    'category': AUDIO_URL,
-                    'tags': get_list(aud.tags.getall(TAGS['TAGS'])[0]),
-                    'authors': get_list(aud.tags.getall(TAGS['AUTORES'])[0]),
-                    'date': ddate.isoformat(),
-                    'audio': 'https://archive.org/download/%s/%s' % (audio_id, path.basename(sFilepath)),
-                    'audio_id': audio_id,
-                    'embed': path.join(PATH_AUDIO, PATH_EMBED, path.basename(sFilepath).replace('.mp3', '.html')),
-                    'image': imgFile,
-                    'duration': int(aud.info.length / 60),
-                    'size': os.stat(sFilepath).st_size,
-                    'type': str(aud.tags.getall(TAGS['TIPO'])[0]).decode('utf-8'),
-                    'template': 'audio',
-                    }
-
-        texto = str(aud.tags.getall(TAGS['TEXTO'])[0]).decode('utf-8')
-        parsed = {}
-
-        #outFile = path.join(output_path, metadata['audio'])
-
+        texto = pd.text()
 
         md = dict(
             language = 'spa',
             mediatype = 'audio',
-            #noindex = 'noindex',
-            collection = 'opensource_audio', # 'test_collection'
+            noindex = 'noindex',
+            collection = 'test_collection', # 'opensource_audio'
             title = metadata['title'],
             description = texto,
             subject = metadata['tags'],
-            date = ddate.isoformat()
+            date = metadata['date'],
         )
 
-        #info('MP3-IMG writing {0}'.format(imgFile))
+        #info('MP3-IMG writing {0}'.format(pd.image_file))
         try:
-            makedirs(imgPath)
+            makedirs(pd.image_fullpath)
         except:
             pass
 
-        save_image(imgData, path.join(output_path, imgFile))
+        self._save_image(pd.image_data, path.join(output_path, pd.image_file))
 
-        i = get_item(audio_id)
-        if not i.item_size:
-            response = upload(audio_id, files=[path.join(output_path, imgFile), sFilepath], metadata=md, verbose=True, verify=True, retries=3, retries_sleep=3600, access_key=S3ACC, secret_key=S3KEY)
-            #info("NEW URL: https://archive.org/details/%s" % audio_id)
-            #info("upload response:", response)
+        archive_data = get_item(pd.audio_id)
+        if not archive_data.item_size:
+            response = upload(
+                pd.audio_id,
+                files=[path.join(output_path, image_file), file_path],
+                metadata=md,
+                verbose=True,
+                verify=True,
+                retries=3,
+                retries_sleep=3600,
+                access_key=S3ACC,
+                secret_key=S3KEY
+            )
+
+            info("NEW URL: https://archive.org/details/%s" % pd.audio_id)
+            info("upload response:", response)
         else:
-            #info("CUR URL: https://archive.org/details/%s" % audio_id)
-            print "xml size:", i.item_size
+            info("CUR URL: https://archive.org/details/%s" % pd.audio_id)
 
-        """
-        #info('MP3 org {0}'.format(sFilepath))
-        info('MP3 writing {0}'.format(outFile))
-        try:
-            makedirs(path.dirname(outFile))
-        except:
-            pass
-        # save mp3
-        copy2(sFilepath, outFile)
-        """
-
-
+        parsed = {}
         for key, value in metadata.items():
             parsed[key] = self.process_metadata(key, value)
 
@@ -162,7 +197,20 @@ class audio_reader(BaseReader):
         content = self._md.convert(texto)
         return content, parsed
 
+    def _save_image(self, oData, sPath):
+        basewidth = 500
+        img = Image.open(cStringIO.StringIO(oData))
+        height = self._get_hsize(img, basewidth)
+        img = img.resize((basewidth, height), Image.ANTIALIAS)
+        img.save(sPath)
+
+    def _get_hsize(self, img, width):
+        wpercent = (width/float(img.size[0]))
+        return int((float(img.size[1])*float(wpercent)))
+
+
 def generate_embed_pages(generator, writer):
+    """ Generate iFrame-Player , called after write all html articles """
 
     embed_first = False
     for article in generator.articles:
@@ -171,38 +219,69 @@ def generate_embed_pages(generator, writer):
             save_as = article.metadata['embed']
             page = {'mainurl': article.url,}
             metadata = article.metadata
-            #info('writing_embed {0}'.format(save_as))
 
-            writer.write_file(save_as, template, generator.context,
-                              generator.settings['RELATIVE_URLS'], override_output=True, page=page, meta=metadata)
+            writer.write_file(
+                save_as, template, generator.context,
+                generator.settings['RELATIVE_URLS'],
+                override_output=True, page=page, meta=metadata
+            )
+
             if not embed_first:
                 embed_first = True
                 writer.write_file(path.join(PATH_AUDIO, PATH_EMBED,"home.html"), template, generator.context,
                               generator.settings['RELATIVE_URLS'], override_output=True, page=page, meta=metadata)
 
 
-
 def generate_rss_audio(generator, writer):
+    """ Generate rss audio, called after write all html articles """
+
+    feeds_by_type = {}
     feed = create_feed(generator.settings)
+
     for article in generator.articles:
         if 'audio' in article.metadata.keys():
             e = Enclosure(article.audio, str(article.size), u'audio/mpeg')
-            feed.add_item(title=article.title,
-                          link="http://rigorycriterio.es/" + article.url,
-                          description=article.content,
-                          duration=article.duration,
-                          pubdate=article.date,
-                          enclosure=e,
-                          thumb="http://rigorycriterio.es/" + article.image,
-                          unique_id=article.metadata['audio_id'])
 
-    #info('writing_rss audio.rss.xml')
+            feed.add_item(
+                title=article.title,
+                link="http://rigorycriterio.es/" + article.url,
+                description=article.content,
+                duration=article.duration,
+                pubdate=article.date,
+                enclosure=e,
+                thumb="http://rigorycriterio.es/" + article.image,
+                unique_id=article.metadata['audio_id']
+            )
+
+            if article.type_safe not in feeds_by_type.keys():
+                feeds_by_type[article.type_safe] = create_feed(generator.settings, article.type)
+
+            feeds_by_type[article.type_safe].add_item(
+                title=article.title,
+                link="http://rigorycriterio.es/" + article.url,
+                description=article.content,
+                duration=article.duration,
+                pubdate=article.date,
+                enclosure=e,
+                thumb="http://rigorycriterio.es/" + article.image,
+                unique_id=article.metadata['audio_id']
+            )
+
     write_feed(generator.settings, feed)
 
+    for type, feed in feeds_by_type.iteritems():
+        write_feed(generator.settings, feed, type)
+
+
 def add_reader(readers):
+    """ Add new file type reader to pelican """
+
     readers.reader_classes['mp3'] = audio_reader
 
+
 def register():
+    """ Pelican plugin connector """
+
     signals.article_writer_finalized.connect(generate_embed_pages)
     signals.article_writer_finalized.connect(generate_rss_audio)
     signals.readers_init.connect(add_reader)
